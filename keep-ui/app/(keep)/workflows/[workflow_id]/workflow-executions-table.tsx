@@ -32,6 +32,7 @@ import {
 import { TableFilters } from "./table-filters";
 import { DOCS_CLIPBOARD_COPY_ERROR_PATH } from "@/shared/constants";
 import { useConfig } from "@/utils/hooks/useConfig";
+import { formatDateForTimeAgo } from "@/utils/helpers";
 
 interface Pagination {
   limit: number;
@@ -243,9 +244,15 @@ export function WorkflowExecutionsTable({
             .replace("second", "sec")
             .replace("hour", "hr");
         };
+
+        const dateString = formatDateForTimeAgo(row.original.started);
+        if (!dateString) {
+          return <div>N/A</div>;
+        }
+
         return (
           <TimeAgo
-            date={row.original.started + "Z"}
+            date={dateString}
             formatter={customFormatter}
           />
         );

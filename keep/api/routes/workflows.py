@@ -670,7 +670,7 @@ def get_workflow_executions_by_alert_fingerprint(
             workflow_execution_id=workflow_execution.workflow_execution_id,
             alert_fingerprint=workflow_execution.alert_fingerprint,
             workflow_status=workflow_execution.workflow_execution.status,
-            workflow_started=workflow_execution.workflow_execution.started,
+            workflow_started=workflow_execution.workflow_execution.started.isoformat(),
             event_id=workflow_execution.event_id,
         )
         for workflow_execution in latest_workflow_to_alert_executions
@@ -1126,7 +1126,7 @@ def get_workflow_execution_status(
         workflow_id=workflow_execution.workflow_id,
         workflow_revision=workflow_execution.workflow_revision,
         status=workflow_execution.status,
-        started=workflow_execution.started,
+        started=workflow_execution.started.isoformat(),
         triggered_by=workflow_execution.triggered_by,
         error=workflow_execution.error,
         execution_time=workflow_execution.execution_time,

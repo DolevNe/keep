@@ -104,7 +104,7 @@ class WorkflowToAlertExecutionDTO(BaseModel):
     workflow_execution_id: str
     alert_fingerprint: str
     workflow_status: str
-    workflow_started: datetime
+    workflow_started: str  # ISO format string
     event_id: str | None
 
 
@@ -112,7 +112,7 @@ class WorkflowExecutionDTO(BaseModel):
     id: str
     workflow_id: str | None  # None for test runs
     workflow_revision: int | None
-    started: datetime
+    started: str  # ISO format string
     triggered_by: str
     status: str
     workflow_name: Optional[str]  # for UI purposes

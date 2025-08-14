@@ -27,6 +27,7 @@ import Link from "next/link";
 import { WorkflowPermissionsBadge } from "@/entities/workflows/ui/WorkflowPermissionsBadge";
 import { parseWorkflowYamlToJSON } from "@/entities/workflows/lib/yaml-utils";
 import { useWorkflowZodSchema } from "@/entities/workflows/lib/useWorkflowZodSchema";
+import { formatDateForTimeAgo } from "@/utils/helpers";
 import "./workflow-tile.css";
 
 function TriggerTile({ trigger }: { trigger: Trigger }) {
@@ -241,7 +242,7 @@ function WorkflowTile({ workflow }: { workflow: Workflow }) {
                 workflow?.last_execution_started && (
                   <div className="text-gray-500 text-sm text-right cursor-pointer truncate max-w-full mt-2 grow min-w-[max-content]">
                     <TimeAgo
-                      date={workflow?.last_execution_started + "Z"}
+                      date={formatDateForTimeAgo(workflow.last_execution_started)}
                       formatter={customFormatter}
                     />
                   </div>

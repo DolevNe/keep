@@ -35,6 +35,62 @@ export function toDateObjectWithFallback(date: string | Date) {
   return new Date();
 }
 
+/**
+ * Formats a date for use with TimeAgo component
+ * Handles different date formats from the API and ensures proper timezone handling
+ */
+export function formatDateForTimeAgo(date: string | Date | null | undefined): string {
+  if (!date) {
+    return '';
+  }
+
+  let dateString: string;
+
+  // If it's already a Date object, convert to ISO string
+  if (date instanceof Date) {
+    dateString = date.toISOString();
+  } else if (typeof date === 'string') {
+    // If it's a string but doesn't end with Z, append it
+    if (!date.endsWith('Z')) {
+      dateString = date + 'Z';
+    } else {
+      dateString = date;
+    }
+  } else {
+    return '';
+  }
+
+  // Validate the date
+  const dateObj = new Date(dateString);
+  if (isNaN(dateObj.getTime())) {
+    console.warn('Invalid date format:', date);
+    return '';
+  }
+
+  return dateString;
+}
+
+/**
+ * Test function to verify date formatting works correctly
+ * This can be called from browser console for debugging
+ */
+export function testDateFormatting() {
+  const testCases = [
+    '2024-01-15T10:30:00',
+    '2024-01-15T10:30:00Z',
+    new Date('2024-01-15T10:30:00Z'),
+    null,
+    undefined,
+    'invalid-date'
+  ];
+
+  console.log('Testing date formatting:');
+  testCases.forEach((testCase, index) => {
+    const result = formatDateForTimeAgo(testCase);
+    console.log(`Test ${index + 1}:`, testCase, '→', result);
+  });
+}
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
