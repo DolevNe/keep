@@ -178,9 +178,10 @@ export default function IncidentAlerts({ incident }: Props) {
         "source",
         "name",
         "description",
+        "assignee",
         "is_created_by_ai",
       ],
-      columnVisibility: { extraPayload: false, assignee: false },
+      columnVisibility: { extraPayload: false },
       columnPinning: {
         left: ["severity", "checkbox", "status", "source", "name"],
         right: ["alertMenu"],
