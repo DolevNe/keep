@@ -210,7 +210,7 @@ def query_alerts(
     bg_tasks.add_task(
         pull_data_from_providers,
         authenticated_entity.tenant_id,
-        request.state.trace_id,
+        request.state.trace_id, 
     )
 
     tenant_id = authenticated_entity.tenant_id
@@ -757,8 +757,8 @@ def get_alert(
             "tenant_id": tenant_id,
         },
     )
-    db_alerts = get_alerts_by_fingerprint(tenant_id=tenant_id,fingerprint=fingerprint)
-    alert = convert_db_alerts_to_dto_alerts(db_alerts)
+    all_alerts = get_all_alerts(authenticated_entity=authenticated_entity)
+    alert = list(filter(lambda alert: alert.fingerprint == fingerprint, all_alerts))
     if alert:
         return alert[0]
     else:
