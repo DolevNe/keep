@@ -63,13 +63,10 @@ export const DEFAULT_COLS = [
   "lastReceived",
   "alertMenu",
 ];
-export const DEFAULT_COLS_VISIBILITY = {
-  ...DEFAULT_COLS.reduce<VisibilityState>(
-    (acc, colId) => ({ ...acc, [colId]: true }),
-    {}
-  ),
-  assignee: true,
-};
+export const DEFAULT_COLS_VISIBILITY = DEFAULT_COLS.reduce<VisibilityState>(
+  (acc, colId) => ({ ...acc, [colId]: true }),
+  {}
+);
 export const getColumnsIds = (columns: ColumnDef<AlertDto>[]) =>
   columns.map((column) => column.id as keyof AlertDto);
 
