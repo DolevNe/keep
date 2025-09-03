@@ -1,0 +1,87 @@
+services:
+  # Simple development environment using existing venv
+  keep-dev-simple:
+    build:
+      context: .
+      dockerfile: Dockerfile.offline-dev-simple
+    container_name: keep-dev-simple
+    working_dir: /app
+    volumes:
+      # Mount the entire repository for development
+      - .:/app
+      # Persist state
+      - ./vendor/state:/state
+    environment:
+      # Python backend environment
+      - PORT=8080
+      - SECRET_MANAGER_TYPE=FILE
+      - SECRET_MANAGER_DIRECTORY=/state
+      - DATABASE_CONNECTION_STRING=sqlite:////state/db.sqlite3?check_same_thread=False
+      - POSTHOG_DISABLED=true
+      - PYTHONPATH=/app
+      
+      # Node.js frontend environment
+      - NEXTAUTH_SECRET=dev-secret-key
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - API_URL=http://keep-backend:8080
+      - SENTRY_DISABLED=true
+      - NODE_ENV=development
+      
+      # WebSocket environment
+      - PUSHER_APP_ID=1
+      - PUSHER_APP_KEY=keepappkey
+      - PUSHER_APP_SECRET=keepappsecret
+      - PUSHER_HOST=keep-websocket-server
+      - PUSHER_PORT=6001
+    ports:
+      - "3000:3000"  # Frontend
+      - "8080:8080"  # Backend API
+    depends_on:
+      - keep-websocket-server
+    command: bash -c "
+      echo '🚀 Starting Keep development environment (simple mode)...' &&
+      
+      # Create state directory
+      mkdir -p /state &&
+      
+      # Extract Node.js dependencies if not already present
+      if [ ! -d /app/keep-ui/node_modules ]; then
+        echo 'Extracting Node.js dependencies...' &&
+        cd /app/keep-ui &&
+        tar -xzf /vendor/node_modules.tar.gz
+      fi &&
+      
+      # Install Python package in development mode using existing venv
+      echo 'Installing Python package in development mode...' &&
+      cd /app &&
+      /app/venv/bin/pip install -e . &&
+      
+      # Start both services with hot reload
+      echo 'Starting development servers...' &&
+      cd /app &&
+      
+      # Start backend in background
+      /app/venv/bin/python -m uvicorn keep.api.api:get_app --host 0.0.0.0 --port 8080 --reload &
+      
+      # Start frontend
+      cd keep-ui &&
+      npm run dev &
+      
+      # Wait for all background processes
+      wait
+    "
+
+  # WebSocket server for real-time features
+  keep-websocket-server:
+    image: quay.io/soketi/soketi:1.4-16-debian
+    container_name: keep-websocket-simple
+    ports:
+      - "6001:6001"
+      - "9601:9601"
+    environment:
+      - SOKETI_USER_AUTHENTICATION_TIMEOUT=3000
+      - SOKETI_DEBUG=1
+      - SOKETI_DEFAULT_APP_ID=1
+      - SOKETI_DEFAULT_APP_KEY=keepappkey
+      - SOKETI_DEFAULT_APP_SECRET=keepappsecret

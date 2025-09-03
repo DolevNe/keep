@@ -1,0 +1,62 @@
+# Simple offline development Dockerfile that uses existing venv
+FROM node:20-alpine AS node-deps
+
+# Create vendor directory for Node.js dependencies
+WORKDIR /vendor/node
+COPY keep-ui/package.json keep-ui/package-lock.json ./
+# Install npm dependencies to vendor directory
+RUN npm ci --cache /vendor/npm-cache
+
+# Create tarball of node_modules for offline use
+RUN tar -czf /vendor/node_modules.tar.gz node_modules/
+
+FROM python:3.13.5-alpine AS final
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    bash \
+    libstdc++ \
+    nodejs \
+    npm \
+    git \
+    postgresql-dev \
+    mysql-client
+
+# Create keep user
+RUN addgroup -g 1000 keep && \
+    adduser -u 1000 -G keep -s /bin/sh -D keep
+
+# Set up working directory
+WORKDIR /app
+RUN chown keep:keep /app
+
+# Copy the entire project including existing venv
+COPY --chown=keep:keep . /app
+
+# Copy Node.js dependencies
+COPY --from=node-deps /vendor/node_modules.tar.gz /vendor/
+COPY --from=node-deps /vendor/npm-cache /vendor/npm-cache
+
+# Set environment variables
+ENV PATH="/app/venv/bin:${PATH}"
+ENV VIRTUAL_ENV="/app/venv"
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONFAULTHANDLER=1
+ENV PYTHONHASHSEED=random
+ENV PYTHONUNBUFFERED=1
+ENV POSTHOG_DISABLED=true
+ENV NODE_ENV=development
+
+# Install pnpm globally (preferred package manager)
+RUN npm install -g pnpm
+
+# Create directory for vendor dependencies
+RUN mkdir -p /vendor && chown -R keep:keep /vendor
+
+# Set ownership
+RUN chown -R keep:keep /app /vendor
+
+USER keep
+
+# Default command for development
+CMD ["bash"]
