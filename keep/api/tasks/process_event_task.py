@@ -838,7 +838,7 @@ def __save_error_alerts(
                 "tenant_id": tenant_id,
             },
         )
-        session = get_session_sync()
+        from keep.api.core.db import use_transaction
 
         # Convert to list if single dict
         if not isinstance(raw_events, list):
@@ -855,35 +855,35 @@ def __save_error_alerts(
                     "raw_events": raw_events,
                 },
             )
-        for raw_event in raw_events:
-            # Convert AlertDto to dict if needed
-            if isinstance(raw_event, AlertDto):
-                logger.info("Converting AlertDto to dict")
-                raw_event = raw_event.dict()
+        with use_transaction() as session:
+            for raw_event in raw_events:
+                # Convert AlertDto to dict if needed
+                if isinstance(raw_event, AlertDto):
+                    logger.info("Converting AlertDto to dict")
+                    raw_event = raw_event.dict()
 
-            # TODO: change to debug
-            logger.debug(
-                "Creating AlertRaw object",
-                extra={
-                    "tenant_id": tenant_id,
-                    "raw_event": raw_event,
-                },
-            )
-            alert = AlertRaw(
-                tenant_id=tenant_id,
-                raw_alert=raw_event,
-                provider_type=provider_type,
-                error=True,
-                error_message=error_message,
-            )
-            session.add(alert)
-            logger.info("AlertRaw object created")
-        session.commit()
+                # TODO: change to debug
+                logger.debug(
+                    "Creating AlertRaw object",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "raw_event": raw_event,
+                    },
+                )
+                alert = AlertRaw(
+                    tenant_id=tenant_id,
+                    raw_alert=raw_event,
+                    provider_type=provider_type,
+                    error=True,
+                    error_message=error_message,
+                )
+                session.add(alert)
+                logger.info("AlertRaw object created")
         logger.info("Successfully saved error alerts")
     except Exception:
         logger.exception("Failed to save error alerts")
     finally:
-        session.close()
+        pass
 
 
 async def async_process_event(*args, **kwargs):

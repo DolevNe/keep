@@ -455,16 +455,13 @@ class TopologiesService:
             db_service = TopologyService(
                 **service.dict(), tenant_id=tenant_id, is_manual=True
             )
-            session.add(db_service)
-            session.commit()
+            with session.begin():
+                session.add(db_service)
             session.refresh(db_service)
             return db_service
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while creating/updating the services manually: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def create_services(
@@ -475,18 +472,13 @@ class TopologiesService:
         """Creates multiple services in a single transaction without returning them."""
 
         try:
-            for service in services:
-                db_service = TopologyService(**service.dict(), tenant_id=tenant_id)
-                session.add(db_service)
-
-            session.commit()
-
+            with session.begin():
+                for service in services:
+                    db_service = TopologyService(**service.dict(), tenant_id=tenant_id)
+                    session.add(db_service)
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while creating services: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def update_service(
@@ -511,15 +503,13 @@ class TopologiesService:
                         and db_service.__getattribute__(attr) != service_dict[attr]
                     ):
                         db_service.__setattr__(attr, service_dict[attr])
-                session.commit()
+                with session.begin():
+                    pass
                 session.refresh(db_service)
                 return db_service
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while updating the services manually: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def delete_services(service_ids: list[int], tenant_id: str, session: Session):
@@ -535,7 +525,8 @@ class TopologiesService:
                 raise ServiceNotManualException()
 
             # Deleting all the dependencies first
-            session.query(TopologyServiceDependency).filter(
+            with session.begin():
+                session.query(TopologyServiceDependency).filter(
                 TopologyServiceDependency.service.has(
                     and_(
                         TopologyService.tenant_id == tenant_id,
@@ -547,7 +538,7 @@ class TopologiesService:
                         ),
                     )
                 )
-            ).delete(synchronize_session=False)
+                ).delete(synchronize_session=False)
 
             deleted_count = (
                 session.query(TopologyService)
@@ -560,14 +551,9 @@ class TopologiesService:
 
             if deleted_count == 0:
                 raise ServiceNotFoundException("No services found for the given IDs.")
-
-            session.commit()
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while deleting services: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def create_dependency(
@@ -586,16 +572,13 @@ class TopologiesService:
                 raise ServiceNotManualException()
 
             db_dependency = TopologyServiceDependency(**dependency.dict())
-            session.add(db_dependency)
-            session.commit()
+            with session.begin():
+                session.add(db_dependency)
             session.refresh(db_dependency)
             return TopologyServiceDependencyDto.from_orm(db_dependency)
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while creating/updating the Dependency manually: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def create_dependencies(
@@ -609,30 +592,26 @@ class TopologiesService:
         try:
             db_dependencies = []
 
-            for dependency in dependencies:
-                # Enforcing is_manual on the service_id and depends_on_service_id
-                if enforce_manual and validate_non_manual_exists(
-                    service_ids=[
-                        dependency.service_id,
-                        dependency.depends_on_service_id,
-                    ],
-                    session=session,
-                    tenant_id=tenant_id,
-                ):
-                    raise ServiceNotManualException()
+            with session.begin():
+                for dependency in dependencies:
+                    # Enforcing is_manual on the service_id and depends_on_service_id
+                    if enforce_manual and validate_non_manual_exists(
+                        service_ids=[
+                            dependency.service_id,
+                            dependency.depends_on_service_id,
+                        ],
+                        session=session,
+                        tenant_id=tenant_id,
+                    ):
+                        raise ServiceNotManualException()
 
-                db_dependency = TopologyServiceDependency(**dependency.dict())
-                session.add(db_dependency)
-                db_dependencies.append(db_dependency)
-
-            session.commit()
+                    db_dependency = TopologyServiceDependency(**dependency.dict())
+                    session.add(db_dependency)
+                    db_dependencies.append(db_dependency)
 
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while creating dependencies: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def update_dependency(
@@ -664,15 +643,13 @@ class TopologiesService:
                         and db_dependency.__getattribute__(attr) != service_dict[attr]
                     ):
                         db_dependency.__setattr__(attr, service_dict[attr])
-                session.commit()
+                with session.begin():
+                    pass
                 session.refresh(db_dependency)
                 return TopologyServiceDependencyDto.from_orm(db_dependency)
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while updating the Dependency manually: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def delete_dependency(dependency_id: int, session: Session, tenant_id: str):
@@ -695,15 +672,12 @@ class TopologiesService:
 
             if db_dependency is None:
                 raise DependencyNotFoundException()
-            session.delete(db_dependency)
-            session.commit()
+            with session.begin():
+                session.delete(db_dependency)
             return None
         except Exception as e:
-            session.rollback()
             logger.error(f"Error while updating the Dependency manually: {e}")
             raise e
-        finally:
-            session.close()
 
     @staticmethod
     def clean_before_import(tenant_id: str, session: Session):
