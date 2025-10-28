@@ -37,6 +37,7 @@ from keep.api.core.db import (
 from keep.api.core.dependencies import get_pusher_client
 from keep.api.core.elastic import ElasticClient
 from keep.api.core.metrics import (
+    alert_db_insert_duration,
     events_error_counter,
     events_in_counter,
     events_out_counter,
@@ -222,6 +223,7 @@ def __save_to_db(
     deduplicated_events: list[AlertDto],
     provider_id: str | None = None,
     timestamp_forced: datetime.datetime | None = None,
+    start_time: float | None = None,
 ):
     try:
         # keep raw events in the DB if the user wants to
@@ -382,6 +384,12 @@ def __save_to_db(
         # Single commit for all alerts
         session.commit()
         
+        # Record DB insert duration metric per alert
+        if start_time and saved_alerts:
+            db_insert_duration = time.time() - start_time
+            for _ in saved_alerts:
+                alert_db_insert_duration.observe(db_insert_duration)
+        
         # Batch update last_alerts (defer to after commit)
         if saved_alerts:
             __batch_set_last_alerts(tenant_id, saved_alerts, session)
@@ -472,6 +480,7 @@ def __handle_formatted_events(
     notify_client: bool = True,
     timestamp_forced: datetime.datetime | None = None,
     job_id: str | None = None,
+    start_time: float | None = None,
 ):
     """
     this is super important function and does five things:
@@ -558,6 +567,7 @@ def __handle_formatted_events(
             deduplicated_events,
             provider_id,
             timestamp_forced,
+            start_time,
         )
 
     # let's save all fields to the DB so that we can use them in the future such in deduplication fields suggestions
@@ -881,6 +891,7 @@ def process_event(
                 notify_client,
                 timestamp_forced,
                 job_id,
+                start_time,
             )
 
             logger.info(
