@@ -75,23 +75,21 @@ def process_topology(
     )
     service_to_keep_service_id_map = {}
     # First create the services so we have ids
-    with use_session(session) as s:
-        with s.begin():
-            for service in topology_data:
-                service_copy = copy.deepcopy(service.dict())
-                service_copy.pop("dependencies")
-                db_service = TopologyService(**service_copy, tenant_id=tenant_id)
-                s.add(db_service)
-                s.flush()
-                service_to_keep_service_id_map[service.service] = db_service.id
+    with session.begin():
+        for service in topology_data:
+            service_copy = copy.deepcopy(service.dict())
+            service_copy.pop("dependencies")
+            db_service = TopologyService(**service_copy, tenant_id=tenant_id)
+            session.add(db_service)
+            session.flush()
+            service_to_keep_service_id_map[service.service] = db_service.id
 
     application_to_services = {}
     application_to_name = {}
 
     # Then create the dependencies
-    with use_session(session) as s:
-        with s.begin():
-            for service in topology_data:
+    with session.begin():
+        for service in topology_data:
                 # Group all services by application (this is for processing application related data in the next step)
                 if service.application_relations is not None:
                     service_id = service_to_keep_service_id_map.get(service.service)
@@ -113,7 +111,7 @@ def process_topology(
                             extra={"service": service.service, "dependency": dependency},
                         )
                         continue
-                    s.add(
+                    session.add(
                         TopologyServiceDependency(
                             service_id=service_id,
                             depends_on_service_id=depends_on_service_id,

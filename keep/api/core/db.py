@@ -174,10 +174,21 @@ def use_transaction(session: Optional[Session] = None) -> Iterator[Session]:
     session.begin() pattern. On normal exit it commits; on error it
     automatically rolls back. If no session is provided, creates and closes
     one for the caller.
+    
+    If a session is passed in that already has an active transaction, it will
+    be reused without starting a nested transaction (avoiding InvalidRequestError).
+    The caller is responsible for committing/rolling back in this case.
     """
-    with use_session(session) as _session:
-        with _session.begin():
-            yield _session
+    if session is not None:
+        # Session was passed in - assume caller manages the transaction
+        # Don't start a new transaction or commit/rollback
+        yield session
+        return
+    
+    # No session provided - create one with a transaction we control
+    with Session(engine) as created_session:
+        with created_session.begin():
+            yield created_session
 
 
 def run_in_txn(fn: Callable[..., Any], *args: Any, session: Optional[Session] = None, **kwargs: Any) -> Any:

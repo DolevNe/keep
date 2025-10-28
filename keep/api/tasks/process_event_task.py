@@ -210,7 +210,8 @@ def __batch_set_last_alerts(
             )
             session.execute(stmt)
     
-    session.commit()
+    # Note: No commit here - caller is responsible for committing the session
+    # This function is designed to be called within an existing transaction
     logger.info(f"Batch updated last_alerts: {len(to_insert)} inserts, {len(update_data)} updates")
 
 
@@ -381,18 +382,18 @@ def __save_to_db(
         if audit_entries:
             session.add_all(audit_entries)
         
-        # Single commit for all alerts
+        # Batch update last_alerts (before commit, in same transaction)
+        if saved_alerts:
+            __batch_set_last_alerts(tenant_id, saved_alerts, session)
+        
+        # Single commit for all alerts AND last_alerts
         session.commit()
         
-        # Record DB insert duration metric per alert
+        # Record DB insert duration metric per alert (after successful commit)
         if start_time and saved_alerts:
             db_insert_duration = time.time() - start_time
             for _ in saved_alerts:
                 alert_db_insert_duration.observe(db_insert_duration)
-        
-        # Batch update last_alerts (defer to after commit)
-        if saved_alerts:
-            __batch_set_last_alerts(tenant_id, saved_alerts, session)
 
         # Run mapping rules and enrichment after DB inserts
         for formatted_event in formatted_events:
