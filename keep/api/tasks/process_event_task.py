@@ -29,6 +29,7 @@ from keep.api.core.db import (
     get_all_presets_dtos,
     get_enrichment_with_session,
     get_last_alert_hashes_by_fingerprints,
+    get_last_alerts_by_fingerprints,
     get_session_sync,
     get_started_at_for_alerts,
     set_last_alert,
@@ -127,6 +128,91 @@ def __validate_last_received(event):
             ).isoformat()
 
 
+def __batch_set_last_alerts(
+    tenant_id: str,
+    alerts: List[Alert],
+    session: Session,
+) -> None:
+    """
+    Batch update LastAlert table for multiple alerts.
+    Uses bulk operations instead of per-alert upserts.
+    """
+    if not alerts:
+        return
+    
+    from keep.api.models.db.alert import LastAlert
+    from sqlalchemy import update as sa_update
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+    from sqlmodel import select
+    import dateutil.tz as tz
+    
+    fingerprints = [alert.fingerprint for alert in alerts]
+    alerts_by_fingerprint = {alert.fingerprint: alert for alert in alerts}
+    
+    # Fetch all existing last_alerts in one query
+    existing_last_alerts = {
+        la.fingerprint: la
+        for la in session.exec(
+            select(LastAlert).where(
+                LastAlert.tenant_id == tenant_id,
+                LastAlert.fingerprint.in_(fingerprints)
+            )
+        ).all()
+    }
+    
+    to_insert = []
+    to_update_ids = []
+    update_data = []
+    
+    for alert in alerts:
+        existing = existing_last_alerts.get(alert.fingerprint)
+        
+        if existing:
+            # Only update if new alert is newer
+            if existing.timestamp.replace(tzinfo=tz.UTC) < alert.timestamp.replace(tzinfo=tz.UTC):
+                to_update_ids.append(existing.id)
+                update_data.append({
+                    "id": existing.id,
+                    "timestamp": alert.timestamp,
+                    "alert_id": alert.id,
+                    "alert_hash": alert.alert_hash,
+                })
+        else:
+            # New entry
+            to_insert.append(
+                LastAlert(
+                    tenant_id=tenant_id,
+                    fingerprint=alert.fingerprint,
+                    timestamp=alert.timestamp,
+                    first_timestamp=alert.timestamp,
+                    alert_id=alert.id,
+                    alert_hash=alert.alert_hash,
+                )
+            )
+    
+    # Bulk insert new entries
+    if to_insert:
+        session.add_all(to_insert)
+    
+    # Bulk update existing entries
+    if update_data:
+        for data in update_data:
+            stmt = (
+                sa_update(LastAlert)
+                .where(LastAlert.id == data["id"])
+                .values(
+                    timestamp=data["timestamp"],
+                    alert_id=data["alert_id"],
+                    alert_hash=data["alert_hash"],
+                )
+            )
+            session.execute(stmt)
+    
+    session.commit()
+    logger.info(f"Batch updated last_alerts: {len(to_insert)} inserts, {len(update_data)} updates")
+
+
 def __save_to_db(
     tenant_id,
     provider_type,
@@ -179,6 +265,8 @@ def __save_to_db(
 
         enriched_formatted_events = []
         saved_alerts = []
+        audit_entries = []
+        alerts_to_insert = []
 
         fingerprints = [event.fingerprint for event in formatted_events]
         started_at_for_fingerprints = get_started_at_for_alerts(
@@ -261,11 +349,7 @@ def __save_to_db(
                 alert_args["timestamp"] = timestamp_forced
 
             alert = Alert(**alert_args)
-            session.add(alert)
-            session.flush()
-            saved_alerts.append(alert)
-            alert_id = alert.id
-            formatted_event.event_id = str(alert_id)
+            alerts_to_insert.append(alert)
 
             if KEEP_AUDIT_EVENTS_ENABLED:
                 audit = AlertAudit(
@@ -279,12 +363,31 @@ def __save_to_db(
                     user_id="system",
                     description=f"Alert recieved from provider with status {formatted_event.status}",
                 )
-                session.add(audit)
+                audit_entries.append(audit)
 
-            session.commit()
-            session.flush()
-            set_last_alert(tenant_id, alert, session=session)
+        # Batch insert all alerts at once
+        if alerts_to_insert:
+            session.add_all(alerts_to_insert)
+            session.flush()  # Assign IDs to all alerts
+            
+            # Now update event_ids and collect saved alerts
+            for alert, formatted_event in zip(alerts_to_insert, formatted_events):
+                formatted_event.event_id = str(alert.id)
+                saved_alerts.append(alert)
+        
+        # Batch insert audit entries
+        if audit_entries:
+            session.add_all(audit_entries)
+        
+        # Single commit for all alerts
+        session.commit()
+        
+        # Batch update last_alerts (defer to after commit)
+        if saved_alerts:
+            __batch_set_last_alerts(tenant_id, saved_alerts, session)
 
+        # Run mapping rules and enrichment after DB inserts
+        for formatted_event in formatted_events:
             # Mapping
             try:
                 enrichments_bl.run_mapping_rules(formatted_event)
@@ -496,30 +599,27 @@ def __handle_formatted_events(
     # after the alert enriched and mapped, lets send it to the elasticsearch
     with tracer.start_as_current_span("process_event_push_to_elasticsearch"):
         elastic_client = ElasticClient(tenant_id=tenant_id)
-        if elastic_client.enabled:
-            for alert in enriched_formatted_events:
-                try:
-                    logger.debug(
-                        "Pushing alert to elasticsearch",
-                        extra={
-                            "alert_event_id": alert.event_id,
-                            "alert_fingerprint": alert.fingerprint,
-                        },
-                    )
-                    elastic_client.index_alert(
-                        alert=alert,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to push alerts to elasticsearch",
-                        extra={
-                            "provider_type": provider_type,
-                            "num_of_alerts": len(formatted_events),
-                            "provider_id": provider_id,
-                            "tenant_id": tenant_id,
-                        },
-                    )
-                    continue
+        if elastic_client.enabled and enriched_formatted_events:
+            try:
+                logger.debug(
+                    "Batch pushing alerts to elasticsearch",
+                    extra={
+                        "num_alerts": len(enriched_formatted_events),
+                        "tenant_id": tenant_id,
+                    },
+                )
+                elastic_client.index_alerts(enriched_formatted_events)
+                logger.debug(f"Successfully batch indexed {len(enriched_formatted_events)} alerts to elasticsearch")
+            except Exception:
+                logger.exception(
+                    "Failed to batch push alerts to elasticsearch",
+                    extra={
+                        "provider_type": provider_type,
+                        "num_of_alerts": len(formatted_events),
+                        "provider_id": provider_id,
+                        "tenant_id": tenant_id,
+                    },
+                )
 
     if MAINTENANCE_WINDOW_ALERT_STRATEGY == "recover_previous_status":
         ignored_events = list(
