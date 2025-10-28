@@ -163,8 +163,7 @@ def __batch_set_last_alerts(
     }
     
     to_insert = []
-    to_update_ids = []
-    update_data = []
+    to_update = []
     
     for alert in alerts:
         existing = existing_last_alerts.get(alert.fingerprint)
@@ -172,13 +171,11 @@ def __batch_set_last_alerts(
         if existing:
             # Only update if new alert is newer
             if existing.timestamp.replace(tzinfo=tz.UTC) < alert.timestamp.replace(tzinfo=tz.UTC):
-                to_update_ids.append(existing.id)
-                update_data.append({
-                    "id": existing.id,
-                    "timestamp": alert.timestamp,
-                    "alert_id": alert.id,
-                    "alert_hash": alert.alert_hash,
-                })
+                # Update the existing object in place
+                existing.timestamp = alert.timestamp
+                existing.alert_id = alert.id
+                existing.alert_hash = alert.alert_hash
+                to_update.append(existing)
         else:
             # New entry
             to_insert.append(
@@ -196,23 +193,14 @@ def __batch_set_last_alerts(
     if to_insert:
         session.add_all(to_insert)
     
-    # Bulk update existing entries
-    if update_data:
-        for data in update_data:
-            stmt = (
-                sa_update(LastAlert)
-                .where(LastAlert.id == data["id"])
-                .values(
-                    timestamp=data["timestamp"],
-                    alert_id=data["alert_id"],
-                    alert_hash=data["alert_hash"],
-                )
-            )
-            session.execute(stmt)
+    # Add updated entries back to session
+    if to_update:
+        for last_alert in to_update:
+            session.add(last_alert)
     
     # Note: No commit here - caller is responsible for committing the session
     # This function is designed to be called within an existing transaction
-    logger.info(f"Batch updated last_alerts: {len(to_insert)} inserts, {len(update_data)} updates")
+    logger.info(f"Batch updated last_alerts: {len(to_insert)} inserts, {len(to_update)} updates")
 
 
 def __save_to_db(
