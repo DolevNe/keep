@@ -784,141 +784,141 @@ def process_event(
 
     raw_event = copy.deepcopy(event)
     events_in_counter.inc()
-    try:
-        with tracer.start_as_current_span("process_event_get_db_session"):
-            # Create a session to be used across the processing task
-            session = get_session_sync()
-
-        # Pre alert formatting extraction rules
-        with tracer.start_as_current_span("process_event_pre_alert_formatting"):
-            enrichments_bl = EnrichmentsBl(tenant_id, session)
-            try:
-                event = enrichments_bl.run_extraction_rules(event, pre=True)
-            except Exception:
-                logger.exception("Failed to run pre-formatting extraction rules")
-
-        with tracer.start_as_current_span("process_event_provider_formatting"):
-            if (
-                provider_type is not None
-                and isinstance(event, dict)
-                or isinstance(event, FormData)
-                or isinstance(event, list)
-            ):
+    
+    # Import at function level to avoid circular dependency
+    from keep.api.core.db import use_session
+    
+    # Use context manager for proper session lifecycle
+    with use_session() as session:
+        try:
+            # Pre alert formatting extraction rules
+            with tracer.start_as_current_span("process_event_pre_alert_formatting"):
+                enrichments_bl = EnrichmentsBl(tenant_id, session)
                 try:
-                    provider_class = ProvidersFactory.get_provider_class(provider_type)
+                    event = enrichments_bl.run_extraction_rules(event, pre=True)
                 except Exception:
-                    provider_class = ProvidersFactory.get_provider_class("keep")
+                    logger.exception("Failed to run pre-formatting extraction rules")
 
-                if isinstance(event, list):
-                    event_list = []
-                    for event_item in event:
-                        if not isinstance(event_item, AlertDto):
-                            event_list.append(
-                                provider_class.format_alert(
-                                    tenant_id=tenant_id,
-                                    event=event_item,
-                                    provider_id=provider_id,
-                                    provider_type=provider_type,
+            with tracer.start_as_current_span("process_event_provider_formatting"):
+                if (
+                    provider_type is not None
+                    and isinstance(event, dict)
+                    or isinstance(event, FormData)
+                    or isinstance(event, list)
+                ):
+                    try:
+                        provider_class = ProvidersFactory.get_provider_class(provider_type)
+                    except Exception:
+                        provider_class = ProvidersFactory.get_provider_class("keep")
+
+                    if isinstance(event, list):
+                        event_list = []
+                        for event_item in event:
+                            if not isinstance(event_item, AlertDto):
+                                event_list.append(
+                                    provider_class.format_alert(
+                                        tenant_id=tenant_id,
+                                        event=event_item,
+                                        provider_id=provider_id,
+                                        provider_type=provider_type,
+                                    )
                                 )
-                            )
-                        else:
-                            event_list.append(event_item)
-                    event = event_list
-                else:
-                    event = provider_class.format_alert(
-                        tenant_id=tenant_id,
-                        event=event,
-                        provider_id=provider_id,
-                        provider_type=provider_type,
-                    )
-                # SHAHAR: for aws cloudwatch, we get a subscription notification message that we should skip
-                #         todo: move it to be generic
-                if event is None and provider_type == "cloudwatch":
-                    logger.info(
-                        "This is a subscription notification message from AWS - skipping processing",
-                        extra=extra_dict,
-                    )
-                    return
-                elif event is None:
-                    logger.info(
-                        "Provider returned None (failed silently), skipping processing",
-                        extra=extra_dict,
-                    )
+                            else:
+                                event_list.append(event_item)
+                        event = event_list
+                    else:
+                        event = provider_class.format_alert(
+                            tenant_id=tenant_id,
+                            event=event,
+                            provider_id=provider_id,
+                            provider_type=provider_type,
+                        )
+                    # SHAHAR: for aws cloudwatch, we get a subscription notification message that we should skip
+                    #         todo: move it to be generic
+                    if event is None and provider_type == "cloudwatch":
+                        logger.info(
+                            "This is a subscription notification message from AWS - skipping processing",
+                            extra=extra_dict,
+                        )
+                        return
+                    elif event is None:
+                        logger.info(
+                            "Provider returned None (failed silently), skipping processing",
+                            extra=extra_dict,
+                        )
 
-        if event:
-            if isinstance(event, str):
-                extra_dict["raw_event"] = event
-                logger.error(
-                    "Event is a string (malformed json?), skipping processing",
-                    extra=extra_dict,
+            if event:
+                if isinstance(event, str):
+                    extra_dict["raw_event"] = event
+                    logger.error(
+                        "Event is a string (malformed json?), skipping processing",
+                        extra=extra_dict,
+                    )
+                    return None
+
+                # In case when provider_type is not set
+                if isinstance(event, dict):
+                    if not event.get("name"):
+                        event["name"] = event.get("id", "unknown alert name")
+                    event = [AlertDto(**event)]
+                    raw_event = [raw_event]
+
+                # Prepare the event for the digest
+                if isinstance(event, AlertDto):
+                    event = [event]
+                    raw_event = [raw_event]
+
+                with tracer.start_as_current_span("process_event_internal_preparation"):
+                    __internal_prepartion(event, fingerprint, api_key_name)
+
+                formatted_events = __handle_formatted_events(
+                    tenant_id,
+                    provider_type,
+                    session,
+                    raw_event,
+                    event,
+                    tracer,
+                    provider_id,
+                    notify_client,
+                    timestamp_forced,
+                    job_id,
+                    start_time,
                 )
-                return None
 
-            # In case when provider_type is not set
-            if isinstance(event, dict):
-                if not event.get("name"):
-                    event["name"] = event.get("id", "unknown alert name")
-                event = [AlertDto(**event)]
-                raw_event = [raw_event]
+                logger.info(
+                    "Event processed",
+                    extra={**extra_dict, "processing_time": time.time() - start_time},
+                )
+                events_out_counter.inc()
+                return formatted_events
+        except Exception:
+            stacktrace = traceback.format_exc()
+            tb = traceback.extract_tb(sys.exc_info()[2])
 
-            # Prepare the event for the digest
-            if isinstance(event, AlertDto):
-                event = [event]
-                raw_event = [raw_event]
+            # Get the name of the last function in the traceback
+            try:
+                last_function = tb[-1].name if tb else ""
+            except Exception:
+                last_function = ""
 
-            with tracer.start_as_current_span("process_event_internal_preparation"):
-                __internal_prepartion(event, fingerprint, api_key_name)
+            # Check if the last function matches the pattern
+            if "_format_alert" in last_function or "_format" in last_function:
+                # In case of exception, add the alerts to the defect table
+                error_msg = stacktrace
+            # if this is a bug in the code, we don't want the user to see the stacktrace
+            else:
+                error_msg = "Error processing event, contact Keep team for more information"
 
-            formatted_events = __handle_formatted_events(
-                tenant_id,
-                provider_type,
-                session,
-                raw_event,
-                event,
-                tracer,
-                provider_id,
-                notify_client,
-                timestamp_forced,
-                job_id,
-                start_time,
-            )
-
-            logger.info(
-                "Event processed",
+            logger.exception(
+                "Error processing event",
                 extra={**extra_dict, "processing_time": time.time() - start_time},
             )
-            events_out_counter.inc()
-            return formatted_events
-    except Exception:
-        stacktrace = traceback.format_exc()
-        tb = traceback.extract_tb(sys.exc_info()[2])
+            __save_error_alerts(tenant_id, provider_type, raw_event, error_msg)
+            events_error_counter.inc()
 
-        # Get the name of the last function in the traceback
-        try:
-            last_function = tb[-1].name if tb else ""
-        except Exception:
-            last_function = ""
-
-        # Check if the last function matches the pattern
-        if "_format_alert" in last_function or "_format" in last_function:
-            # In case of exception, add the alerts to the defect table
-            error_msg = stacktrace
-        # if this is a bug in the code, we don't want the user to see the stacktrace
-        else:
-            error_msg = "Error processing event, contact Keep team for more information"
-
-        logger.exception(
-            "Error processing event",
-            extra={**extra_dict, "processing_time": time.time() - start_time},
-        )
-        __save_error_alerts(tenant_id, provider_type, raw_event, error_msg)
-        events_error_counter.inc()
-
-        # Retrying only if context is present (running the job in arq worker)
-        if bool(ctx):
-            raise Retry(defer=ctx["job_try"] * TIMES_TO_RETRY_JOB)
-    finally:
-        session.close()
+            # Retrying only if context is present (running the job in arq worker)
+            if bool(ctx):
+                raise Retry(defer=ctx["job_try"] * TIMES_TO_RETRY_JOB)
 
 
 def __save_error_alerts(
