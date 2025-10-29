@@ -62,6 +62,12 @@ from keep.rulesengine.rulesengine import RulesEngine
 from keep.workflowmanager.workflowmanager import WorkflowManager
 
 TIMES_TO_RETRY_JOB = 5  # the number of times to retry the job in case of failure
+
+# Batch processing configuration
+ALERT_PROCESSING_BATCH_SIZE = int(os.environ.get("ALERT_PROCESSING_BATCH_SIZE", "50"))
+# If batch commit fails, fall back to individual inserts
+ALERT_PROCESSING_USE_FALLBACK = os.environ.get("ALERT_PROCESSING_USE_FALLBACK", "true") == "true"
+
 # Opt-outs/ins
 KEEP_STORE_RAW_ALERTS = os.environ.get("KEEP_STORE_RAW_ALERTS", "false") == "true"
 
@@ -203,6 +209,159 @@ def __batch_set_last_alerts(
     logger.info(f"Batch updated last_alerts: {len(to_insert)} inserts, {len(to_update)} updates")
 
 
+def __save_single_alert_to_db(
+    tenant_id: str,
+    provider_type: str,
+    session: Session,
+    raw_event: dict,
+    formatted_event: AlertDto,
+    enrichments_bl: EnrichmentsBl,
+    provider_id: str | None = None,
+    timestamp_forced: datetime.datetime | None = None,
+    start_time: float | None = None,
+) -> tuple[Alert | None, AlertDto | None]:
+    """
+    Save a single alert to the database.
+    Returns (alert, enriched_event) on success, (None, None) on failure.
+    """
+    try:
+        # Calculate started_at
+        started_at = get_started_at_for_alerts(
+            tenant_id, [formatted_event.fingerprint], session=session
+        ).get(formatted_event.fingerprint, None)
+        
+        if started_at:
+            formatted_event.startedAt = str(started_at)
+        
+        formatted_event.pushed = True
+        
+        if KEEP_CALCULATE_START_FIRING_TIME_ENABLED:
+            previous_alert = get_alerts_by_fingerprint(
+                tenant_id=tenant_id,
+                fingerprint=formatted_event.fingerprint,
+                limit=1,
+            )
+            previous_alert = convert_db_alerts_to_dto_alerts(previous_alert)
+            formatted_event.firingStartTime = calculated_start_firing_time(
+                formatted_event, previous_alert
+            )
+            formatted_event.firingStartTimeSinceLastResolved = (
+                calculate_firing_time_since_last_resolved(
+                    formatted_event, previous_alert
+                )
+            )
+            formatted_event.firingCounter = calculated_firing_counter(
+                formatted_event, previous_alert
+            )
+            formatted_event.unresolvedCounter = calculated_unresolved_counter(
+                formatted_event, previous_alert
+            )
+        
+        # Dispose enrichments
+        try:
+            enrichments_bl.dispose_enrichments(formatted_event.fingerprint)
+        except Exception:
+            logger.exception(
+                "Failed to dispose enrichments",
+                extra={
+                    "tenant_id": tenant_id,
+                    "fingerprint": formatted_event.fingerprint,
+                },
+            )
+        
+        # Post format enrichment
+        try:
+            formatted_event = enrichments_bl.run_extraction_rules(formatted_event)
+        except Exception:
+            logger.exception(
+                "Failed to run post-formatting extraction rules",
+                extra={
+                    "tenant_id": tenant_id,
+                    "fingerprint": formatted_event.fingerprint,
+                },
+            )
+        
+        __validate_last_received(formatted_event)
+        
+        # Create Alert object
+        alert_args = {
+            "tenant_id": tenant_id,
+            "provider_type": (
+                provider_type if provider_type else formatted_event.source[0]
+            ),
+            "event": formatted_event.dict(),
+            "provider_id": provider_id,
+            "fingerprint": formatted_event.fingerprint,
+            "alert_hash": formatted_event.alert_hash,
+        }
+        alert_args = sanitize_alert(alert_args)
+        if timestamp_forced is not None:
+            alert_args["timestamp"] = timestamp_forced
+        
+        alert = Alert(**alert_args)
+        session.add(alert)
+        session.flush()  # Get alert ID
+        
+        formatted_event.event_id = str(alert.id)
+        
+        # Add audit entry
+        if KEEP_AUDIT_EVENTS_ENABLED:
+            audit = AlertAudit(
+                tenant_id=tenant_id,
+                fingerprint=formatted_event.fingerprint,
+                action=(
+                    ActionType.AUTOMATIC_RESOLVE.value
+                    if formatted_event.status == AlertStatus.RESOLVED.value
+                    else ActionType.TIGGERED.value
+                ),
+                user_id="system",
+                description=f"Alert recieved from provider with status {formatted_event.status}",
+            )
+            session.add(audit)
+        
+        # Update last_alert
+        __batch_set_last_alerts(tenant_id, [alert], session)
+        
+        # Commit this single alert
+        session.commit()
+        
+        # Record metric
+        if start_time:
+            db_insert_duration = time.time() - start_time
+            alert_db_insert_duration.observe(db_insert_duration)
+        
+        # Enrich the alert
+        try:
+            enrichments_bl.run_mapping_rules(formatted_event)
+        except Exception:
+            logger.exception("Failed to run mapping rules")
+        
+        alert_enrichment = get_enrichment_with_session(
+            session=session,
+            tenant_id=tenant_id,
+            fingerprint=formatted_event.fingerprint,
+        )
+        if alert_enrichment:
+            for enrichment in alert_enrichment.enrichments:
+                value = alert_enrichment.enrichments[enrichment]
+                if isinstance(value, str):
+                    value = value.strip()
+                setattr(formatted_event, enrichment, value)
+        
+        return alert, formatted_event
+        
+    except Exception as e:
+        logger.exception(
+            f"Failed to save single alert {formatted_event.fingerprint}: {e}",
+            extra={
+                "tenant_id": tenant_id,
+                "fingerprint": formatted_event.fingerprint,
+            }
+        )
+        session.rollback()
+        return None, None
+
+
 def __save_to_db(
     tenant_id,
     provider_type,
@@ -214,6 +373,11 @@ def __save_to_db(
     timestamp_forced: datetime.datetime | None = None,
     start_time: float | None = None,
 ):
+    """
+    Save alerts to database using sub-batching with automatic fallback to 
+    individual inserts on batch failure. This ensures partial failures don't
+    cause loss of all alerts in the batch.
+    """
     try:
         # keep raw events in the DB if the user wants to
         # this is mainly for debugging and research purposes
@@ -254,16 +418,106 @@ def __save_to_db(
                     action_description="Alert lastReceived enriched on deduplication",
                 )
 
-        enriched_formatted_events = []
-        saved_alerts = []
-        audit_entries = []
-        alerts_to_insert = []
-
+        # Track all successfully saved alerts and enriched events
+        all_saved_alerts = []
+        all_enriched_events = []
+        failed_count = 0
+        
+        # Pre-fetch data for all alerts to optimize batch processing
         fingerprints = [event.fingerprint for event in formatted_events]
         started_at_for_fingerprints = get_started_at_for_alerts(
             tenant_id, fingerprints, session=session
         )
+        
+        # Process alerts in sub-batches
+        total_alerts = len(formatted_events)
+        batch_size = ALERT_PROCESSING_BATCH_SIZE
+        num_batches = (total_alerts + batch_size - 1) // batch_size
+        
+        logger.info(
+            f"Processing {total_alerts} alerts in {num_batches} sub-batches of size {batch_size}",
+            extra={"tenant_id": tenant_id}
+        )
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, total_alerts)
+            batch_events = formatted_events[start_idx:end_idx]
+            batch_raw_events = raw_events[start_idx:end_idx] if len(raw_events) == total_alerts else []
+            
+            logger.debug(
+                f"Processing sub-batch {batch_idx + 1}/{num_batches} ({len(batch_events)} alerts)",
+                extra={"tenant_id": tenant_id}
+            )
+            
+            # Try batch insert first
+            batch_saved_alerts, batch_enriched_events, batch_failed = __save_batch_to_db(
+                tenant_id=tenant_id,
+                provider_type=provider_type,
+                session=session,
+                raw_events=batch_raw_events,
+                formatted_events=batch_events,
+                enrichments_bl=enrichments_bl,
+                provider_id=provider_id,
+                timestamp_forced=timestamp_forced,
+                start_time=start_time,
+                started_at_for_fingerprints=started_at_for_fingerprints,
+                batch_idx=batch_idx,
+            )
+            
+            all_saved_alerts.extend(batch_saved_alerts)
+            all_enriched_events.extend(batch_enriched_events)
+            failed_count += batch_failed
+        
+        logger.info(
+            f"Alert batch processing complete: {len(all_saved_alerts)} saved, {failed_count} failed",
+            extra={"tenant_id": tenant_id}
+        )
+        
+        # Return the enriched events from all successful batches
+        return all_enriched_events
+        
+    except Exception:
+        logger.exception(
+            "Failed to add new alerts to the DB",
+            extra={
+                "provider_type": provider_type,
+                "num_of_alerts": len(formatted_events),
+                "provider_id": provider_id,
+                "tenant_id": tenant_id,
+            },
+        )
+        raise
 
+
+def __save_batch_to_db(
+    tenant_id: str,
+    provider_type: str,
+    session: Session,
+    raw_events: list[dict],
+    formatted_events: list[AlertDto],
+    enrichments_bl: EnrichmentsBl,
+    provider_id: str | None,
+    timestamp_forced: datetime.datetime | None,
+    start_time: float | None,
+    started_at_for_fingerprints: dict,
+    batch_idx: int,
+) -> tuple[list[Alert], list[AlertDto], int]:
+    """
+    Save a batch of alerts. If batch commit fails and fallback is enabled,
+    retry each alert individually.
+    
+    Returns (saved_alerts, enriched_events, failed_count)
+    """
+    saved_alerts = []
+    enriched_events = []
+    failed_count = 0
+    
+    try:
+        # Prepare all alerts in the batch
+        alerts_to_insert = []
+        audit_entries = []
+        
         for formatted_event in formatted_events:
             formatted_event.pushed = True
 
@@ -403,7 +657,7 @@ def __save_to_db(
                     if isinstance(value, str):
                         value = value.strip()
                     setattr(formatted_event, enrichment, value)
-            enriched_formatted_events.append(formatted_event)
+            enriched_events.append(formatted_event)
 
         logger.info("Checking for incidents to resolve", extra={"tenant_id": tenant_id})
         try:
@@ -435,27 +689,89 @@ def __save_to_db(
             )
         session.commit()
 
-        logger.info(
-            "Added new alerts to the DB",
-            extra={
-                "provider_type": provider_type,
-                "num_of_alerts": len(formatted_events),
-                "provider_id": provider_id,
-                "tenant_id": tenant_id,
-            },
+        logger.debug(
+            f"Batch {batch_idx + 1}: Successfully saved {len(saved_alerts)} alerts",
+            extra={"tenant_id": tenant_id},
         )
-        return enriched_formatted_events
-    except Exception:
-        logger.exception(
-            "Failed to add new alerts to the DB",
-            extra={
-                "provider_type": provider_type,
-                "num_of_alerts": len(formatted_events),
-                "provider_id": provider_id,
-                "tenant_id": tenant_id,
-            },
+        return saved_alerts, enriched_events, failed_count
+        
+    except Exception as batch_error:
+        logger.warning(
+            f"Batch {batch_idx + 1} commit failed: {batch_error}. "
+            f"Attempting individual alert fallback if enabled.",
+            extra={"tenant_id": tenant_id, "batch_size": len(formatted_events)}
         )
-        raise
+        session.rollback()
+        
+        # Fallback: Try each alert individually
+        if ALERT_PROCESSING_USE_FALLBACK:
+            logger.info(
+                f"Falling back to individual inserts for batch {batch_idx + 1}",
+                extra={"tenant_id": tenant_id}
+            )
+            
+            for idx, (formatted_event, raw_event) in enumerate(zip(formatted_events, raw_events or formatted_events)):
+                try:
+                    alert, enriched_event = __save_single_alert_to_db(
+                        tenant_id=tenant_id,
+                        provider_type=provider_type,
+                        session=session,
+                        raw_event=raw_event if isinstance(raw_event, dict) else formatted_event.dict(),
+                        formatted_event=formatted_event,
+                        enrichments_bl=enrichments_bl,
+                        provider_id=provider_id,
+                        timestamp_forced=timestamp_forced,
+                        start_time=start_time,
+                    )
+                    
+                    if alert and enriched_event:
+                        saved_alerts.append(alert)
+                        enriched_events.append(enriched_event)
+                    else:
+                        failed_count += 1
+                        # Save to error table
+                        __save_error_alerts(
+                            tenant_id, 
+                            provider_type,
+                            raw_event if isinstance(raw_event, dict) else formatted_event.dict(),
+                            f"Individual alert save failed in fallback (batch {batch_idx + 1}, alert {idx + 1})"
+                        )
+                        
+                except Exception as individual_error:
+                    logger.error(
+                        f"Failed to save individual alert {formatted_event.fingerprint}: {individual_error}",
+                        extra={"tenant_id": tenant_id}
+                    )
+                    failed_count += 1
+                    # Save to error table
+                    __save_error_alerts(
+                        tenant_id,
+                        provider_type,
+                        raw_event if isinstance(raw_event, dict) else formatted_event.dict(),
+                        f"Exception in individual save: {str(individual_error)}"
+                    )
+            
+            logger.info(
+                f"Batch {batch_idx + 1} fallback complete: {len(saved_alerts)} saved, {failed_count} failed",
+                extra={"tenant_id": tenant_id}
+            )
+            return saved_alerts, enriched_events, failed_count
+        else:
+            # Fallback disabled, all alerts in batch are lost
+            logger.error(
+                f"Batch {batch_idx + 1} failed and fallback is disabled. All {len(formatted_events)} alerts lost.",
+                extra={"tenant_id": tenant_id}
+            )
+            # Save all alerts to error table
+            for raw_event, formatted_event in zip(raw_events or formatted_events, formatted_events):
+                __save_error_alerts(
+                    tenant_id,
+                    provider_type,
+                    raw_event if isinstance(raw_event, dict) else formatted_event.dict(),
+                    f"Batch commit failed: {str(batch_error)}"
+                )
+            failed_count = len(formatted_events)
+            return saved_alerts, enriched_events, failed_count
 
 
 def __handle_formatted_events(
