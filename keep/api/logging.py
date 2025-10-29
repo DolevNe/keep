@@ -195,7 +195,6 @@ class ProviderDBHandler(logging.Handler):
         self.records = []
 
         try:
-            session = Session(next(get_session()).bind)
             log_entries = []
 
             for record in _records:
@@ -216,9 +215,10 @@ class ProviderDBHandler(logging.Handler):
                 )
                 log_entries.append(entry)
 
-            session.add_all(log_entries)
-            session.commit()
-            session.close()
+            # Use transactional helper to ensure atomic commit/rollback and proper closing
+            from keep.api.core.db import use_transaction
+            with use_transaction() as session:
+                session.add_all(log_entries)
         except Exception as e:
             # Use the parent logger to avoid infinite recursion
             logging.getLogger(__name__).error(

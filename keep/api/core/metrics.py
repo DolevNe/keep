@@ -24,6 +24,11 @@ processing_time_summary = Summary(
     f"{METRIC_PREFIX}processing_time_seconds",
     "Average time spent processing events",
 )
+alert_db_insert_duration = Histogram(
+    f"{METRIC_PREFIX}alert_db_insert_duration_seconds",
+    "Time from Redis queue consumption to DB insert completion per alert",
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),  # 10ms to 10s
+)
 
 running_tasks_gauge = Gauge(
     f"{METRIC_PREFIX}running_tasks_current",

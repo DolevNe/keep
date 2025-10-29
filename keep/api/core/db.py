@@ -154,6 +154,58 @@ def get_session_sync() -> Session:
     return Session(engine)
 
 
+@contextmanager
+def use_session(session: Optional[Session] = None) -> Iterator[Session]:
+    """
+    Context manager that yields an existing session if provided, otherwise
+    creates a new session bound to the global engine and closes it on exit.
+    """
+    if session is not None:
+        yield session
+        return
+    with Session(engine) as created_session:
+        yield created_session
+
+
+@contextmanager
+def use_transaction(session: Optional[Session] = None) -> Iterator[Session]:
+    """
+    Context manager that ensures a transactional scope using SQLAlchemy's
+    session.begin() pattern. On normal exit it commits; on error it
+    automatically rolls back. If no session is provided, creates and closes
+    one for the caller.
+    
+    If a session is passed in that already has an active transaction, it will
+    be reused without starting a nested transaction (avoiding InvalidRequestError).
+    The caller is responsible for committing/rolling back in this case.
+    """
+    if session is not None:
+        # Session was passed in - assume caller manages the transaction
+        # Don't start a new transaction or commit/rollback
+        yield session
+        return
+    
+    # No session provided - create one with a transaction we control
+    with Session(engine) as created_session:
+        with created_session.begin():
+            yield created_session
+
+
+def run_in_txn(fn: Callable[..., Any], *args: Any, session: Optional[Session] = None, **kwargs: Any) -> Any:
+    """
+    Execute a callable inside a transaction. If no session is provided, a new
+    one is created and disposed automatically.
+
+    Example:
+        def do_work(session: Session, x: int) -> int:
+            session.add(...)
+            return x
+
+        result = run_in_txn(do_work, 1)
+    """
+    with use_transaction(session) as _session:
+        return fn(_session, *args, **kwargs)
+
 def __convert_to_uuid(value: str, should_raise: bool = False) -> UUID | None:
     try:
         return UUID(value)
