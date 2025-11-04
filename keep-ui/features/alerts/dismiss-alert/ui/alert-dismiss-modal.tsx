@@ -44,7 +44,7 @@ export function AlertDismissModal({
   const [selectedDateTime, setSelectedDateTime] = useState<Date | null>(null);
   const [showError, setShowError] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [disposeOnNewAlert, setDisposeOnNewAlert] = useState<boolean>(true);
+  const [disposeOnNewAlert, setDisposeOnNewAlert] = useState<boolean>(false);
 
   const revalidateMultiple = useRevalidateMultiple();
   const presetsMutator = () => revalidateMultiple(["/preset"]);
