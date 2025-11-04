@@ -10,6 +10,7 @@ import {
   TabPanel,
   TabPanels,
   Callout,
+  Switch,
 } from "@tremor/react";
 import Modal from "@/components/ui/Modal";
 import DatePicker from "react-datepicker";
@@ -43,6 +44,7 @@ export function AlertDismissModal({
   const [selectedDateTime, setSelectedDateTime] = useState<Date | null>(null);
   const [showError, setShowError] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [disposeOnNewAlert, setDisposeOnNewAlert] = useState<boolean>(true);
 
   const revalidateMultiple = useRevalidateMultiple();
   const presetsMutator = () => revalidateMultiple(["/preset"]);
@@ -106,7 +108,7 @@ export function AlertDismissModal({
 
     try {
       await api.post(
-        `/alerts/batch_enrich?dispose_on_new_alert=true`,
+        `/alerts/batch_enrich?dispose_on_new_alert=${disposeOnNewAlert}`,
         requestData
       );
       toast.success(`${alerts.length} alerts dismissed successfully!`, {
@@ -127,6 +129,7 @@ export function AlertDismissModal({
     setSelectedDateTime(null);
     setDismissComment("");
     setShowError(false);
+    setDisposeOnNewAlert(true);
     handleClose();
   };
 
@@ -214,6 +217,21 @@ export function AlertDismissModal({
               </TabPanel>
             </TabPanels>
           </TabGroup>
+          <div className="flex justify-between mt-2.5 mb-4">
+            <div>
+              <Subtitle>
+                {alerts.length === 1 ? "Dispose on new alert" : "Dispose on new alerts"}
+              </Subtitle>
+              <span className="text-xs text-gray-500">
+                This will dispose the dismissal when an alert with the same fingerprint
+                comes in.
+              </span>
+            </div>
+            <Switch
+              checked={disposeOnNewAlert}
+              onChange={(checked) => setDisposeOnNewAlert(checked)}
+            />
+          </div>
           <Title>Dismiss Comment</Title>
           <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
             <ReactQuill
