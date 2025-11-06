@@ -51,6 +51,12 @@ const nextConfig = {
       );
     }
 
+    // Reduce parallelism for memory-constrained environments
+    // Limit to 2 workers if WEBPACK_MAX_WORKERS is set, otherwise use default
+    if (process.env.WEBPACK_MAX_WORKERS) {
+      config.parallelism = parseInt(process.env.WEBPACK_MAX_WORKERS, 10);
+    }
+
     // Ignore warnings about critical dependencies, since they are not critical
     // https://github.com/getsentry/sentry-javascript/issues/12077#issuecomment-2407569917
     config.ignoreWarnings = [

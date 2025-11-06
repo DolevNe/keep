@@ -7,7 +7,7 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 # Install dependencies based on the preferred package manager
-COPY package.json package-lock.json ./
+COPY keep-ui/package.json keep-ui/package-lock.json ./
 RUN npm ci  --noproxy registry.npmjs.org --maxsockets 1
 
 
@@ -15,7 +15,8 @@ RUN npm ci  --noproxy registry.npmjs.org --maxsockets 1
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY keep-ui/ .
+RUN chmod +x next_build.sh
 
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry
@@ -55,7 +56,7 @@ COPY --from=builder /app/public ./public
 # https://nextjs.org/docs/advanced-features/output-file-tracing
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY entrypoint.sh /app/entrypoint.sh
+COPY keep-ui/entrypoint.sh /app/entrypoint.sh
 
 # as per Openshift guidelines, https://docs.openshift.com/container-platform/4.11/openshift_images/create-images.html#use-uid_create-images
 RUN chgrp -R 0 /app && chmod -R g=u /app
